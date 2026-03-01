@@ -3,7 +3,11 @@
 import { useCallback, useEffect, useRef, useState } from "react"
 import { FolderPlus } from "lucide-react"
 import { useSpreadsheet, ROWS, COLS } from "@/hooks/use-spreadsheet"
-import { useCategories, type Category } from "@/hooks/use-categories"
+import {
+  useCategories, type Category,
+  computeItemHorizontalResult, evaluateComparison,
+  getComparisonTarget, computeResult,
+} from "@/hooks/use-categories"
 import { Button } from "@/components/ui/button"
 import { Toolbar } from "./toolbar"
 import { FormulaBar } from "./formula-bar"
@@ -13,282 +17,228 @@ import { CategoryPanel } from "./category-panel"
 
 export function Spreadsheet() {
   const {
-    cells,
-    selectedCell,
-    setSelectedCell,
-    selectionRange,
-    setSelectionRange,
-    editingCell,
-    setEditingCell,
-    getCell,
-    setCellValue,
-    setCellStyle,
-    setStyleForSelection,
-    undo,
-    redo,
-    copy,
-    paste,
-    deleteSelection,
-    getSelectedCellRef,
-    getSelectedValues,
-    applyFunctionToSelection,
-    getColLetter,
+    cells, selectedCell, setSelectedCell, selectionRange, setSelectionRange,
+    editingCell, setEditingCell, getCell, setCellValue, setCellStyle,
+    setStyleForSelection, undo, redo, copy, paste, deleteSelection,
+    getSelectedCellRef, getSelectedValues, applyFunctionToSelection, getColLetter,
   } = useSpreadsheet()
 
   const {
-    categories,
-    addCategory,
-    removeCategory,
-    setOperation,
-    addItem,
-    removeItem,
-    getResult,
+    categories, addCategory, removeCategory, setOperation,
+    addItem, removeItem, updateItem, getResult,
+    addComparison, updateComparison, removeComparison,
   } = useCategories()
 
   const [categoryPanelOpen, setCategoryPanelOpen] = useState(false)
 
-  const containerRef = useRef<HTMLDivElement>(null)
+  // Track which grid anchor each category was sent to, so updates can re-render
+  // in-place without requiring a manual "Inserir na planilha" click.
+  const categoryAnchorRef = useRef<Record<string, { row: number; col: number }>>({})
 
+  const containerRef = useRef<HTMLDivElement>(null)
   const currentCellData = selectedCell ? getCell(selectedCell.row, selectedCell.col) : null
 
-  const handleCellSelect = useCallback(
-    (row: number, col: number) => {
-      setSelectedCell({ row, col })
-      setEditingCell(null)
-    },
-    [setSelectedCell, setEditingCell]
-  )
+  // ─── Cell handlers ────────────────────────────────────────────────────────
+  const handleCellSelect     = useCallback((row: number, col: number) => { setSelectedCell({ row, col }); setEditingCell(null) }, [setSelectedCell, setEditingCell])
+  const handleCellEdit       = useCallback((row: number, col: number) => { setEditingCell({ row, col }) }, [setEditingCell])
+  const handleCellValueChange = useCallback((r: number, c: number, v: string) => { setCellValue(r, c, v) }, [setCellValue])
+  const handleFormulaBarChange = useCallback((v: string) => { if (selectedCell) setCellValue(selectedCell.row, selectedCell.col, v) }, [selectedCell, setCellValue])
+  const handleInsertFormula  = useCallback((formula: string) => {
+    if (!selectedCell) return
+    setEditingCell(selectedCell)
+    setTimeout(() => {
+      const input = document.querySelector<HTMLInputElement>(`input[class*="font-mono"]`)
+      if (input) { input.value = formula; input.focus(); input.setSelectionRange(formula.length, formula.length) }
+    }, 50)
+  }, [selectedCell, setEditingCell])
+  const handleApplyFunction  = useCallback((fn: string) => { applyFunctionToSelection(fn) }, [applyFunctionToSelection])
 
-  const handleCellEdit = useCallback(
-    (row: number, col: number) => {
-      setEditingCell({ row, col })
-    },
-    [setEditingCell]
-  )
+  // ─── Core grid writer ────────────────────────────────────────────────────
+  // Extracted so both "first send" and "auto-sync on edit" call the same logic.
+  const writeCategoryToGrid = useCallback((
+    category: Category,
+    startRow: number,
+    startCol: number
+  ) => {
+    const isHorizontal = category.operation.startsWith("HORIZONTAL_")
+    const catResult    = computeResult(category.items, category.operation)
 
-  const handleCellValueChange = useCallback(
-    (row: number, col: number, value: string) => {
-      setCellValue(row, col, value)
-    },
-    [setCellValue]
-  )
-
-  const handleFormulaBarChange = useCallback(
-    (value: string) => {
-      if (selectedCell) {
-        setCellValue(selectedCell.row, selectedCell.col, value)
-      }
-    },
-    [selectedCell, setCellValue]
-  )
-
-  const handleInsertFormula = useCallback(
-    (formula: string) => {
-      if (selectedCell) {
-        setEditingCell(selectedCell)
-        // We'll set the formula in the editing state - it will be applied on Enter
-        setTimeout(() => {
-          const input = document.querySelector<HTMLInputElement>(
-            `input[class*="font-mono"]`
-          )
-          if (input) {
-            input.value = formula
-            input.focus()
-            input.setSelectionRange(formula.length, formula.length)
-          }
-        }, 50)
-      }
-    },
-    [selectedCell, setEditingCell]
-  )
-
-  const handleApplyFunction = useCallback(
-    (funcName: string) => {
-      applyFunctionToSelection(funcName)
-    },
-    [applyFunctionToSelection]
-  )
-
-  // Send category data to the grid starting from the selected cell
-  const handleSendToGrid = useCallback(
-    (category: Category) => {
-      const startRow = selectedCell ? selectedCell.row : 0
-      const startCol = selectedCell ? selectedCell.col : 0
-
-      // Write category name as header
-      setCellValue(startRow, startCol, category.name)
-      setCellValue(startRow, startCol + 1, "Valor")
-
-      // Style the header
-      setCellStyle(startRow, startCol, { bold: true, bgColor: category.color, textColor: "#ffffff" })
-      setCellStyle(startRow, startCol + 1, { bold: true, bgColor: category.color, textColor: "#ffffff" })
-
-      // Write items
-      category.items.forEach((item, idx) => {
-        const row = startRow + 1 + idx
-        if (row < ROWS) {
-          setCellValue(row, startCol, item.name)
-          setCellValue(row, startCol + 1, item.value.toString())
-        }
-      })
-
-      // Write result row
-      const resultRow = startRow + 1 + category.items.length
-      if (resultRow < ROWS) {
-        setCellValue(resultRow, startCol, `${category.operation}:`)
-        setCellStyle(resultRow, startCol, { bold: true })
-
-        // Use a formula referencing the value range
-        const rangeStart = getColLetter(startCol + 1) + (startRow + 2)
-        const rangeEnd = getColLetter(startCol + 1) + (startRow + 1 + category.items.length)
-        setCellValue(resultRow, startCol + 1, `=${category.operation}(${rangeStart}:${rangeEnd})`)
-        setCellStyle(resultRow, startCol + 1, { bold: true })
-      }
-
-      // Select the first data cell
-      setSelectedCell({ row: startRow, col: startCol })
-    },
-    [selectedCell, setCellValue, setCellStyle, setSelectedCell, getColLetter]
-  )
-
-  // Check if there are numeric values in the current selection
-  const hasNumericSelection = (() => {
-    const values = getSelectedValues()
-    return values.length > 0
-  })()
-
-  // Keyboard shortcuts
-  useEffect(() => {
-    const handleKeyDown = (e: KeyboardEvent) => {
-      // Don't handle if we're typing in an input outside the grid or in the category panel
-      const target = e.target as HTMLElement
-      if (target.tagName === "INPUT" && !target.closest("[data-spreadsheet-container]")) return
-      if (target.tagName === "INPUT" && target.closest("[data-category-panel]")) return
-
-      if (e.ctrlKey || e.metaKey) {
-        switch (e.key.toLowerCase()) {
-          case "z":
-            e.preventDefault()
-            if (e.shiftKey) {
-              redo()
-            } else {
-              undo()
-            }
-            return
-          case "y":
-            e.preventDefault()
-            redo()
-            return
-          case "c":
-            e.preventDefault()
-            copy()
-            return
-          case "v":
-            e.preventDefault()
-            paste()
-            return
-          case "b":
-            e.preventDefault()
-            if (currentCellData) {
-              setStyleForSelection({ bold: !currentCellData.style.bold })
-            }
-            return
-          case "i":
-            e.preventDefault()
-            if (currentCellData) {
-              setStyleForSelection({ italic: !currentCellData.style.italic })
-            }
-            return
-          case "u":
-            e.preventDefault()
-            if (currentCellData) {
-              setStyleForSelection({ underline: !currentCellData.style.underline })
-            }
-            return
-        }
-      }
-
-      if (!editingCell && selectedCell) {
-        switch (e.key) {
-          case "ArrowUp":
-            e.preventDefault()
-            setSelectedCell({ row: Math.max(0, selectedCell.row - 1), col: selectedCell.col })
-            setSelectionRange(null)
-            break
-          case "ArrowDown":
-            e.preventDefault()
-            setSelectedCell({ row: Math.min(ROWS - 1, selectedCell.row + 1), col: selectedCell.col })
-            setSelectionRange(null)
-            break
-          case "ArrowLeft":
-            e.preventDefault()
-            setSelectedCell({ row: selectedCell.row, col: Math.max(0, selectedCell.col - 1) })
-            setSelectionRange(null)
-            break
-          case "ArrowRight":
-            e.preventDefault()
-            setSelectedCell({ row: selectedCell.row, col: Math.min(COLS - 1, selectedCell.col + 1) })
-            setSelectionRange(null)
-            break
-          case "Tab":
-            e.preventDefault()
-            setSelectedCell({ row: selectedCell.row, col: Math.min(COLS - 1, selectedCell.col + 1) })
-            setSelectionRange(null)
-            break
-          case "Enter":
-            e.preventDefault()
-            setEditingCell(selectedCell)
-            break
-          case "Delete":
-          case "Backspace":
-            e.preventDefault()
-            deleteSelection()
-            break
-          case "F2":
-            e.preventDefault()
-            setEditingCell(selectedCell)
-            break
-          default:
-            // Start editing if user types a character
-            if (e.key.length === 1 && !e.ctrlKey && !e.metaKey && !e.altKey) {
-              setEditingCell(selectedCell)
-            }
-            break
-        }
-      }
+    const styleHeader = (row: number, col: number) => {
+      setCellStyle(row, col, { bold: true, bgColor: category.color, textColor: "#ffffff" })
     }
 
-    window.addEventListener("keydown", handleKeyDown)
-    return () => window.removeEventListener("keydown", handleKeyDown)
-  }, [
-    selectedCell,
-    editingCell,
-    currentCellData,
-    setSelectedCell,
-    setSelectionRange,
-    setEditingCell,
-    undo,
-    redo,
-    copy,
-    paste,
-    deleteSelection,
-    setStyleForSelection,
-  ])
+    const formulaMap: Record<string, string> = {
+      SOMA: "SOMA", MEDIA: "MEDIA", CONTAR: "CONTAR", MAX: "MAX", MIN: "MIN",
+    }
+    const hFormulaMap: Record<string, string> = {
+      HORIZONTAL_SOMA: "SOMA", HORIZONTAL_MEDIA: "MEDIA",
+      HORIZONTAL_MAX: "MAX",   HORIZONTAL_MIN: "MIN",
+    }
+
+    if (!isHorizontal) {
+      // ── VERTICAL ────────────────────────────────────────────────────────
+      setCellValue(startRow, startCol, category.name); styleHeader(startRow, startCol)
+      setCellValue(startRow, startCol + 1, "Valor");   styleHeader(startRow, startCol + 1)
+
+      category.comparisons.forEach((comp, ci) => {
+        const col = startCol + 2 + ci; if (col >= COLS) return
+        setCellValue(startRow, col, comp.label); styleHeader(startRow, col)
+      })
+
+      category.items.forEach((item, idx) => {
+        const row = startRow + 1 + idx; if (row >= ROWS) return
+        setCellValue(row, startCol, item.name)
+        setCellValue(row, startCol + 1, item.value.toString())
+        category.comparisons.forEach((comp, ci) => {
+          const col = startCol + 2 + ci; if (col >= COLS) return
+          const target = getComparisonTarget(comp, item, catResult, category.operation)
+          if (target === null) return
+          const passed = evaluateComparison(target, comp)
+          setCellValue(row, col, passed ? comp.labelTrue : comp.labelFalse)
+          setCellStyle(row, col, { textColor: passed ? comp.colorPass : comp.colorFail, bold: true })
+        })
+      })
+
+      const resultRow = startRow + 1 + category.items.length
+      if (resultRow < ROWS) {
+        const fn  = formulaMap[category.operation] ?? category.operation
+        const rs  = getColLetter(startCol + 1) + (startRow + 2)
+        const re  = getColLetter(startCol + 1) + (startRow + 1 + category.items.length)
+        setCellValue(resultRow, startCol, `${category.operation}:`)
+        setCellStyle(resultRow, startCol, { bold: true })
+        setCellValue(resultRow, startCol + 1, `=${fn}(${rs}:${re})`)
+        setCellStyle(resultRow, startCol + 1, { bold: true })
+        category.comparisons.forEach((comp, ci) => {
+          if (comp.scope !== "total") return
+          const col = startCol + 2 + ci; if (col >= COLS) return
+          const passed = catResult !== null ? evaluateComparison(catResult, comp) : null
+          if (passed === null) return
+          setCellValue(resultRow, col, passed ? comp.labelTrue : comp.labelFalse)
+          setCellStyle(resultRow, col, { textColor: passed ? comp.colorPass : comp.colorFail, bold: true })
+        })
+      }
+    } else {
+      // ── HORIZONTAL ──────────────────────────────────────────────────────
+      const maxValues    = category.items.reduce((mx, item) => Math.max(mx, item.values?.length ?? 1), 1)
+      const resultCol    = startCol + 1 + maxValues
+      const firstCompCol = resultCol + 1
+
+      setCellValue(startRow, startCol, category.name); styleHeader(startRow, startCol)
+      for (let v = 0; v < maxValues; v++) {
+        const col = startCol + 1 + v; if (col >= COLS) break
+        setCellValue(startRow, col, `Valor ${v + 1}`); styleHeader(startRow, col)
+      }
+      if (resultCol < COLS) { setCellValue(startRow, resultCol, "Resultado"); styleHeader(startRow, resultCol) }
+      category.comparisons.forEach((comp, ci) => {
+        const col = firstCompCol + ci; if (col >= COLS) return
+        setCellValue(startRow, col, comp.label); styleHeader(startRow, col)
+      })
+
+      category.items.forEach((item, idx) => {
+        const row = startRow + 1 + idx; if (row >= ROWS) return
+        setCellValue(row, startCol, item.name)
+        const vals = item.values?.length ? item.values : [item.value]
+        vals.forEach((v, vi) => { const col = startCol + 1 + vi; if (col < COLS) setCellValue(row, col, v.toString()) })
+        if (resultCol < COLS && vals.length > 0) {
+          const fn   = hFormulaMap[category.operation] ?? "SOMA"
+          const fc   = getColLetter(startCol + 1)
+          const lc   = getColLetter(startCol + vals.length)
+          const rr   = (row + 1).toString()
+          setCellValue(row, resultCol, `=${fn}(${fc}${rr}:${lc}${rr})`)
+          setCellStyle(row, resultCol, { bold: true })
+        }
+        category.comparisons.forEach((comp, ci) => {
+          const col = firstCompCol + ci; if (col >= COLS) return
+          const target = getComparisonTarget(comp, item, catResult, category.operation)
+          if (target === null) return
+          const passed = evaluateComparison(target, comp)
+          setCellValue(row, col, passed ? comp.labelTrue : comp.labelFalse)
+          setCellStyle(row, col, { textColor: passed ? comp.colorPass : comp.colorFail, bold: true })
+        })
+      })
+
+      const summaryRow = startRow + 1 + category.items.length
+      if (summaryRow < ROWS) {
+        const labels: Record<string, string> = { HORIZONTAL_SOMA: "Soma:", HORIZONTAL_MEDIA: "Média:", HORIZONTAL_MAX: "Máximo:", HORIZONTAL_MIN: "Mínimo:" }
+        setCellValue(summaryRow, startCol, labels[category.operation] ?? "Total:")
+        setCellStyle(summaryRow, startCol, { bold: true })
+        if (resultCol < COLS && category.items.length > 0) {
+          const fn = hFormulaMap[category.operation] ?? "SOMA"
+          const rl = getColLetter(resultCol)
+          setCellValue(summaryRow, resultCol, `=${fn}(${rl}${startRow + 2}:${rl}${startRow + 1 + category.items.length})`)
+          setCellStyle(summaryRow, resultCol, { bold: true })
+        }
+        category.comparisons.forEach((comp, ci) => {
+          if (comp.scope !== "total") return
+          const col = firstCompCol + ci; if (col >= COLS) return
+          const passed = catResult !== null ? evaluateComparison(catResult, comp) : null
+          if (passed === null) return
+          setCellValue(summaryRow, col, passed ? comp.labelTrue : comp.labelFalse)
+          setCellStyle(summaryRow, col, { textColor: passed ? comp.colorPass : comp.colorFail, bold: true })
+        })
+      }
+    }
+  }, [setCellValue, setCellStyle, getColLetter])
+
+  // ─── "Inserir na planilha" (manual) ──────────────────────────────────────
+  const handleSendToGrid = useCallback((category: Category) => {
+    const startRow = selectedCell?.row ?? 0
+    const startCol = selectedCell?.col ?? 0
+    categoryAnchorRef.current[category.id] = { row: startRow, col: startCol }
+    writeCategoryToGrid(category, startRow, startCol)
+    setSelectedCell({ row: startRow, col: startCol })
+  }, [selectedCell, writeCategoryToGrid, setSelectedCell])
+
+  // ─── Auto-sync when a category's items change ─────────────────────────────
+  // We keep a prev-categories ref to detect which category changed, then
+  // re-write only that category to its last known anchor.
+  const prevCategoriesRef = useRef<Category[]>([])
+  useEffect(() => {
+    const prev = prevCategoriesRef.current
+    categories.forEach((cat) => {
+      const anchor = categoryAnchorRef.current[cat.id]
+      if (!anchor) return // never been sent to grid — skip
+      const prevCat = prev.find((c) => c.id === cat.id)
+      if (!prevCat) return
+      // Simple deep-compare: check if items changed
+      const itemsChanged = JSON.stringify(cat.items) !== JSON.stringify(prevCat.items)
+      const compsChanged = JSON.stringify(cat.comparisons) !== JSON.stringify(prevCat.comparisons)
+      const opChanged    = cat.operation !== prevCat.operation
+      if (itemsChanged || compsChanged || opChanged) {
+        writeCategoryToGrid(cat, anchor.row, anchor.col)
+      }
+    })
+    prevCategoriesRef.current = categories
+  }, [categories, writeCategoryToGrid])
+
+  // ─── Item update handler ──────────────────────────────────────────────────
+  const handleUpdateItem = useCallback((categoryId: string, itemId: string, name: string, raw: string) => {
+    updateItem(categoryId, itemId, { name, rawValueInput: raw })
+    // Auto-sync is handled by the useEffect above
+  }, [updateItem])
+
+  const hasNumericSelection = (() => getSelectedValues().length > 0)()
+
+  // ─── Keyboard shortcuts ───────────────────────────────────────────────────
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      const target = e.target as HTMLElement
+      if (target.tagName === "INPUT" && !target.closest("[data-spreadsheet-container]")) return
+      if (target.closest("[data-category-panel]")) return
+      if ((e.ctrlKey || e.metaKey) && e.key === "z" && !e.shiftKey) { e.preventDefault(); undo() }
+      if ((e.ctrlKey || e.metaKey) && (e.key === "y" || (e.key === "z" && e.shiftKey))) { e.preventDefault(); redo() }
+      if ((e.ctrlKey || e.metaKey) && e.key === "c") { e.preventDefault(); copy() }
+      if ((e.ctrlKey || e.metaKey) && e.key === "v") { e.preventDefault(); paste() }
+      if ((e.key === "Delete" || e.key === "Backspace") && target.tagName !== "INPUT") { e.preventDefault(); deleteSelection() }
+    }
+    window.addEventListener("keydown", handler)
+    return () => window.removeEventListener("keydown", handler)
+  }, [undo, redo, copy, paste, deleteSelection])
 
   return (
-    <div
-      ref={containerRef}
-      data-spreadsheet-container
-      className="flex flex-col h-screen bg-background"
-    >
-      {/* Header */}
-      <div className="flex items-center justify-between px-4 h-10 bg-card border-b border-border shrink-0">
-        <div className="flex items-center gap-2">
-          <div className="w-5 h-5 rounded-sm bg-primary flex items-center justify-center">
-            <span className="text-primary-foreground text-xs font-bold">P</span>
-          </div>
-          <h1 className="text-sm font-semibold text-foreground">Planilha</h1>
-        </div>
+    <div ref={containerRef} data-spreadsheet-container className="flex flex-col h-screen bg-background text-foreground overflow-hidden">
+      <div className="flex items-center gap-2 px-3 py-1.5 border-b border-border bg-muted/30 shrink-0">
+        <span className="text-sm font-semibold text-foreground mr-2">Planilha</span>
         <Button
           variant={categoryPanelOpen ? "default" : "outline"}
           size="sm"
@@ -305,31 +255,14 @@ export function Spreadsheet() {
         </Button>
       </div>
 
-      {/* Toolbar */}
       <Toolbar
-        currentStyle={
-          currentCellData?.style || {
-            bold: false,
-            italic: false,
-            underline: false,
-            align: "left",
-            fontSize: 13,
-            bgColor: "",
-            textColor: "",
-          }
-        }
+        currentStyle={currentCellData?.style || { bold: false, italic: false, underline: false, align: "left", fontSize: 13, bgColor: "", textColor: "" }}
         onStyleChange={setStyleForSelection}
-        onUndo={undo}
-        onRedo={redo}
-        onCopy={copy}
-        onPaste={paste}
-        onDelete={deleteSelection}
-        onInsertFormula={handleInsertFormula}
-        onApplyFunction={handleApplyFunction}
+        onUndo={undo} onRedo={redo} onCopy={copy} onPaste={paste} onDelete={deleteSelection}
+        onInsertFormula={handleInsertFormula} onApplyFunction={handleApplyFunction}
         hasSelection={hasNumericSelection}
       />
 
-      {/* Formula Bar */}
       <FormulaBar
         cellRef={getSelectedCellRef()}
         value={currentCellData?.value || ""}
@@ -337,26 +270,18 @@ export function Spreadsheet() {
         onValueChange={handleFormulaBarChange}
       />
 
-      {/* Grid + Category Panel */}
       <div className="flex flex-1 min-h-0">
         <Grid
-          getCell={getCell}
-          selectedCell={selectedCell}
-          selectionRange={selectionRange}
-          editingCell={editingCell}
-          onCellSelect={handleCellSelect}
-          onSelectionChange={setSelectionRange}
-          onCellEdit={handleCellEdit}
+          getCell={getCell} selectedCell={selectedCell} selectionRange={selectionRange}
+          editingCell={editingCell} onCellSelect={handleCellSelect}
+          onSelectionChange={setSelectionRange} onCellEdit={handleCellEdit}
           onCellValueChange={handleCellValueChange}
           onStopEditing={() => {
             setEditingCell(null)
-            if (selectedCell) {
-              setSelectedCell({ row: selectedCell.row + 1, col: selectedCell.col })
-            }
+            if (selectedCell) setSelectedCell({ row: selectedCell.row + 1, col: selectedCell.col })
           }}
           getColLetter={getColLetter}
         />
-
         <CategoryPanel
           categories={categories}
           onAddCategory={addCategory}
@@ -364,13 +289,16 @@ export function Spreadsheet() {
           onSetOperation={setOperation}
           onAddItem={addItem}
           onRemoveItem={removeItem}
+          onUpdateItem={handleUpdateItem}
           onSendToGrid={handleSendToGrid}
+          onAddComparison={addComparison}
+          onUpdateComparison={updateComparison}
+          onRemoveComparison={removeComparison}
           isOpen={categoryPanelOpen}
           onToggle={() => setCategoryPanelOpen(!categoryPanelOpen)}
         />
       </div>
 
-      {/* Status Bar */}
       <StatusBar cells={cells} selectionRange={selectionRange} getCell={getCell} />
     </div>
   )
