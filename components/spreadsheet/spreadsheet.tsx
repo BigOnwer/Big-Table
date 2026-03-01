@@ -51,7 +51,48 @@ export function Spreadsheet() {
       if (input) { input.value = formula; input.focus(); input.setSelectionRange(formula.length, formula.length) }
     }, 50)
   }, [selectedCell, setEditingCell])
-  const handleApplyFunction  = useCallback((fn: string) => { applyFunctionToSelection(fn) }, [applyFunctionToSelection])
+  const handleApplyFunction = useCallback((fn: string) => {
+    if (!selectionRange && !selectedCell) return
+    const values = getSelectedValues()
+    if (values.length === 0) return
+
+    let result: number
+    switch (fn) {
+      case "SOMA":   result = values.reduce((a, b) => a + b, 0); break
+      case "MEDIA":  result = values.reduce((a, b) => a + b, 0) / values.length; break
+      case "CONTAR": result = values.length; break
+      case "MAX":    result = Math.max(...values); break
+      case "MIN":    result = Math.min(...values); break
+      default:       return
+    }
+
+    let rangeRef = ""
+    let baseRow = 0, baseCol = 0
+    if (selectionRange) {
+      const { start, end } = selectionRange
+      const minRow = Math.min(start.row, end.row), maxRow = Math.max(start.row, end.row)
+      const minCol = Math.min(start.col, end.col), maxCol = Math.max(start.col, end.col)
+      rangeRef = `${getColLetter(minCol)}${minRow + 1}:${getColLetter(maxCol)}${maxRow + 1}`
+      baseRow  = maxRow
+      baseCol  = minCol
+    } else if (selectedCell) {
+      rangeRef = `${getColLetter(selectedCell.col)}${selectedCell.row + 1}`
+      baseRow  = selectedCell.row
+      baseCol  = selectedCell.col
+    }
+
+    // Find first empty cell below the selection
+    let targetRow = baseRow + 1
+    const targetCol = baseCol
+    for (let r = baseRow + 1; r < Math.min(ROWS, baseRow + 50); r++) {
+      if (!getCell(r, baseCol).value) { targetRow = r; break }
+    }
+    if (targetRow >= ROWS) targetRow = ROWS - 1
+
+    setCellValue(targetRow, targetCol, `=${fn}(${rangeRef})`)
+    setSelectedCell({ row: targetRow, col: targetCol })
+    setSelectionRange(null)
+  }, [selectionRange, selectedCell, getSelectedValues, getCell, getColLetter, setCellValue, setSelectedCell, setSelectionRange])
 
   // ─── Core grid writer ────────────────────────────────────────────────────
   // Extracted so both "first send" and "auto-sync on edit" call the same logic.
@@ -276,10 +317,7 @@ export function Spreadsheet() {
           editingCell={editingCell} onCellSelect={handleCellSelect}
           onSelectionChange={setSelectionRange} onCellEdit={handleCellEdit}
           onCellValueChange={handleCellValueChange}
-          onStopEditing={() => {
-            setEditingCell(null)
-            if (selectedCell) setSelectedCell({ row: selectedCell.row + 1, col: selectedCell.col })
-          }}
+          onStopEditing={() => { setEditingCell(null) }}
           getColLetter={getColLetter}
         />
         <CategoryPanel
